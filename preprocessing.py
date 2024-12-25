@@ -1,3 +1,4 @@
+from config import EMOJIS, DATE, NO_BPE_ITERATIONS, RANDOM_STATE, EMBEDDING_DIM, EMBEDDING_MODEL_EPOCHS
 import re
 from collections import defaultdict
 import os
@@ -6,10 +7,12 @@ from tqdm import tqdm
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
+import logging
+from gensim.models import KeyedVectors
 
 
 class BytePairEncoding:
-    def __init__(self, no_iterations, corpora):
+    def __init__(self, no_iterations=None, corpora=None):
         self.no_iterations = no_iterations
         self.corpora = corpora
 
@@ -26,13 +29,13 @@ class BytePairEncoding:
 
     def _merge_vocab(self, pair, vocab_i):
         vocab_ii = {}
-        bigram = re.escape(' '.join(pair))
-        p = re.compile(r'(?<!\S)' + bigram + r'(?!\S)')
+        pair_str = ' '.join(pair)
+        joined_pair = ''.join(pair)
         
         for word in vocab_i:
-            word_i = p.sub(''.join(pair), word)
+            word_i = word.replace(pair_str, joined_pair)
             vocab_ii[word_i] = vocab_i[word]
-        
+
         return vocab_ii
 
     def _get_vocab(self, data):
@@ -83,6 +86,24 @@ class BytePairEncoding:
 
         return list_of_tokens
     
+    def save(self, file_path):
+        model_data = {
+            'vocab_set': self.vocab_set,
+            'vocabulary': self.vocabulary,
+        }
+
+        with open(file_path, 'wb') as f:
+            pickle.dump(model_data, f)
+
+    def load(self, file_path):
+        with open(file_path, 'rb') as f:
+            model_data = pickle.load(f)
+
+        self.vocab_set = model_data['vocab_set']
+        self.vocabulary = model_data['vocabulary']
+
+
+
     def get_one_hot(self, token):
         vocab = {token: idx for idx, token in enumerate(self.vocabulary)}
         one_hot_matrix = np.eye(len(self.vocabulary))
@@ -92,7 +113,7 @@ class BytePairEncoding:
 
 
 class FastText:
-    def __init__(self, embedding_dim=100, learning_rate=0.01, epochs=5, context_window=5):
+    def __init__(self, embedding_dim=100, learning_rate=0.1, epochs=5, context_window=5):
         self.embedding_dim = embedding_dim
         self.learning_rate = learning_rate
         self.epochs = epochs
@@ -118,7 +139,7 @@ class FastText:
         }
         with open(file_path, 'wb') as f:
             pickle.dump(model_data, f)
-        print(f"Model saved to {file_path}")
+        logging.info(f"Model saved to {file_path}")
 
     @classmethod
     def load_model(cls, file_path):
@@ -136,7 +157,7 @@ class FastText:
         model.index_to_word = model_data['index_to_word']
         model.embeddings = model_data['embeddings']
         model.context_embeddings = model_data['context_embeddings']
-        print(f"Model loaded from {file_path}")
+        logging.info(f"Model loaded from {file_path}")
         return model
 
     def build_vocab(self, corpus):
@@ -162,7 +183,10 @@ class FastText:
                     for context_idx in context_indices:
                         total_loss += self._train_pair(target_idx, context_idx)
             epoch_losses.append(total_loss)  
-            print(f"Epoch {epoch + 1}, Loss: {total_loss:.4f}")
+            logging.info(f"Epoch {epoch + 1}, Loss: {total_loss:.4f}")
+        
+        logging.info(f"Plotting the loss ...")
+        logging.info(f"Losses:{range(1, self.epochs + 1), epoch_losses}")
 
         plt.figure(figsize=(8, 6))
         plt.plot(range(1, self.epochs + 1), epoch_losses, marker='o', label='Loss')
@@ -171,7 +195,7 @@ class FastText:
         plt.ylabel('Loss')
         plt.legend()
         plt.grid(True)
-        plt.savefig('epoch_loss_plot_fasttext.png') 
+        plt.savefig(os.path.join("plots", f"epoch_loss_plot_fasttext {DATE}.png"))
 
     def _train_pair(self, target_idx, context_idx):
         target_embedding = self.embeddings[target_idx]
@@ -197,42 +221,96 @@ class FastText:
         else:
             raise ValueError(f"Word '{word}' not in vocabulary.")
         
+    def get_embeddings(self, sentence):
+        return [self.get_embedding(word) for word in sentence if word in self.word_to_index]
+    
     def get_average_embedding(self, sentence):
-        embeddings = [self.get_embedding(word) for word in sentence if word in self.word_to_index]
+        embeddings = self.get_embeddings(sentence)
 
+        return np.mean(embeddings, axis=0)
+    
+
+class GoogleNewsEmbedding:
+    def __init__(self, model_path):
+        self.model = KeyedVectors.load_word2vec_format(model_path, binary=True)
+
+    def get_embedding(self, word):
+        return self.model[word]
+
+    def get_average_embedding(self, sentence):
+        embeddings = [self.get_embedding(word) for word in sentence if word in self.model]
         return np.mean(embeddings, axis=0)
 
 
-if __name__ == '__main__':
-    # Corpora
-    # Parameters
-    corpora = pd.read_csv(os.path.join('corpora', 'Reviews.csv')).sample(n=10000, random_state=1)['Text']
-    no_bpe_iterations = 32
+if __name__ == "__main__":
+    use_existing_bpe_model = True
 
-    # Learn Tokens
-    BPE = BytePairEncoding(no_bpe_iterations, corpora)
-    BPE.learn()
+    if use_existing_bpe_model:
+        corpora = pd.read_csv(os.path.join("corpora", "Reviews.csv")).sample(n=10000, random_state=RANDOM_STATE)["Text"]
+        new_BPE = BytePairEncoding(no_iterations=NO_BPE_ITERATIONS, corpora=None)
+        new_BPE.load(os.path.join("models", "bpe-2048"))
 
-    # # One-hot vector for the token 't'
-    # one_hot_vector = BPE.get_one_hot('t')
+    else:
+        # Load Larger Corpora
+        corpora = pd.read_csv(os.path.join("corpora", "Reviews.csv")).sample(n=10000, random_state=RANDOM_STATE)["Text"]
 
-    # Target Data
-    training_df = (
-    pd.read_csv(os.path.join('data', 'twitter_training.csv')).rename(columns={'Positive': 'sentiment', 'im getting on borderlands and i will murder you all ,': 'text'}).sample(n=5000, random_state=2))
+        # # Add Emoji Row
+        # emoji_row = " ".join(EMOJIS)
+        # corpora = pd.concat([corpora, pd.Series([emoji_row])], ignore_index=True) # Uncomment this line to add the emoji row
 
-    tokenized_series = training_df["text"].apply(BPE.tokenize)
+        # Learn Tokens
+        BPE = BytePairEncoding(NO_BPE_ITERATIONS, corpora)
+        BPE.learn()
+
+        BPE.save(os.path.join("models", f"bpe {DATE}"))
+
+        new_BPE = BytePairEncoding(NO_BPE_ITERATIONS, corpora)
+        new_BPE.load(os.path.join("models", f"bpe {DATE}"))
+
+    # One-hot vector for the token 't'
+    one_hot_vector = new_BPE.get_one_hot('t')
+
+    logging.info(f"One-hot vector for the token 't': {one_hot_vector}")
+    logging.info(f"Vocabulary: {new_BPE.vocabulary}")
+    logging.info(f"Vocabulary Set: {new_BPE.vocab_set}")
+
+    # Tokenize Corpus
+    tokenized_series = corpora.progress_apply(new_BPE.tokenize)
+
+    logging.info(f"Tokenized Series: {corpora.head(), tokenized_series.head()}")
+
+    logging.info("Training FastText Model ...")
 
     # Train Embedding
-    fasttext_model = FastText(embedding_dim=128, epochs=100)
-    fasttext_model.build_vocab(tokenized_series)
-    fasttext_model.train(tokenized_series)
+    use_existing_fasttext_model = True
 
-    fasttext_model.save_model("fasttext_1")
-    new_fasttext_model = fasttext_model.load_model("fasttext_1")
+    if use_existing_fasttext_model:
+        new_fasttext_model = FastText(embedding_dim=EMBEDDING_DIM, epochs=EMBEDDING_MODEL_EPOCHS)
+        new_fasttext_model.load_model(os.path.join("models", "fasttext-300-40"))
+        
+    else:
+        fasttext_model = FastText(embedding_dim=EMBEDDING_DIM, epochs=EMBEDDING_MODEL_EPOCHS)
+        fasttext_model.build_vocab(tokenized_series)
+        fasttext_model.train(tokenized_series)
+
+        # Save the model
+        fasttext_model.save_model(os.path.join("models", f"fasttext {DATE}"))
+
+        logging.info("Loading the model ...")
+
+        # Load the model
+        new_fasttext_model = fasttext_model.load_model(os.path.join("models", f"fasttext {DATE}"))
 
     # Get the embedding for a specific word
-    word = BPE.tokenize("Bilkent!")
-    embedding = fasttext_model.get_average_embedding(word)
-    print(f"Embedding for '{word}': {embedding}")
+    word = new_BPE.tokenize("Bilkent University is a private university located in Ankara, Turkey!")
+    avg_embedding = new_fasttext_model.get_average_embedding(word)
+    logging.info(f"Average Embedding for '{word}': {avg_embedding}")
 
+    # Load Google News Word2Vec model for comparison
+    google_news_model_path = os.path.join("models", "GoogleNews-vectors-negative300.bin.gz")
+    google_news_embedding = GoogleNewsEmbedding(google_news_model_path)
 
+    sentence = "Bilkent University is a private university located in Ankara, Turkey!"
+    tokenized_sentence = new_BPE.tokenize(sentence)
+    google_news_avg_embedding = google_news_embedding.get_average_embedding(tokenized_sentence)
+    logging.info(f"Google News Average Embedding for '{sentence}': {google_news_avg_embedding}")
